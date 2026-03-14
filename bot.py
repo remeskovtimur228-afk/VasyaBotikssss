@@ -3,142 +3,199 @@ import logging
 import string
 import random
 import aiohttp
+import sqlite3
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import BotCommand, ReplyKeyboardMarkup, KeyboardButton
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import (
+    BotCommand, ReplyKeyboardMarkup, KeyboardButton, 
+    KeyboardButtonRequestUser, Message
+)
 
-# --- НАСТРОЙКИ ---
+# --- КОНФИГУРАЦИЯ ---
 API_TOKEN = '8715185766:AAFa6DQQhdNRuT6uykhX22e3NGa6FgFbkQs'
 ADMIN_ID = 8318867685
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+# --- ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ SERTOF ---
+def init_db():
+    conn = sqlite3.connect('sertof_base.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            full_name TEXT,
+            last_seen DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
-async def check_username_availability(username):
-    """Проверка ника через Fragment и Telegram"""
+def save_user(user_id, username, full_name):
+    conn = sqlite3.connect('sertof_base.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT OR REPLACE INTO users (user_id, username, full_name, last_seen)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+    ''', (user_id, username.replace("@", "") if username else None, full_name))
+    conn.commit()
+    conn.close()
+
+def get_user_from_db(target):
+    conn = sqlite3.connect('sertof_base.db')
+    cursor = conn.cursor()
+    # Ищем либо по ID, либо по юзернейму
+    if target.isdigit():
+        cursor.execute('SELECT * FROM users WHERE user_id = ?', (target,))
+    else:
+        cursor.execute('SELECT * FROM users WHERE username = ?', (target.replace("@", ""),))
+    result = cursor.fetchone()
+    conn.close()
+    return result
+
+# --- ГЕНЕРАЦИЯ ЮЗЕРОВ ---
+async def check_nick(username):
     async with aiohttp.ClientSession() as session:
-        # Проверка в ТГ через веб-интерфейс
         async with session.get(f"https://t.me/{username}") as resp:
-            t_me_text = await resp.text()
-            # Если страницы нет или есть кнопка связи — ник может быть свободен
-            is_tg_free = "If you have Telegram, you can contact" not in t_me_text
-        
-        # Проверка на Fragment
+            t_text = await resp.text()
+            is_tg_free = "If you have Telegram, you can contact" not in t_text
         async with session.get(f"https://fragment.com/username/{username}") as resp:
-            is_fragment_free = resp.status == 200 # 200 значит доступен для торга/покупки
-            
-    return is_tg_free, is_fragment_free
+            is_fr_free = resp.status == 200
+    return is_tg_free, is_fr_free
 
-def generate_random_nick(length=5, digits=False):
-    chars = string.ascii_lowercase
-    if digits:
-        chars += string.digits
-    return ''.join(random.choice(chars) for _ in range(length))
+# --- КЛАВИАТУРА ---
+def get_main_kb():
+    buttons = [
+        [KeyboardButton(text="👤 Найти ID (Выбор цели)", request_user=KeyboardButtonRequestUser(request_id=1))],
+        [KeyboardButton(text="📊 Статистика базы"), KeyboardButton(text="📝 История поиска")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
-# --- ЛОГИКА КОМАНД ---
+# --- ОБРАБОТЧИКИ КОМАНД ---
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer(
-        "Привет! Я — бот Sertof Team. Меня запрограммировали для поиска данных и охоты за редкими юзернеймами.\n\n"
-        "Что я умею:\n"
-        "1. Пробивать инфу по ID или @юзеру (просто отправь их мне).\n"
-        "2. Вытягивать данные из присланных контактов.\n"
-        "3. Генерировать свободные 5-6 значные ники.\n\n"
-        "Пользуйся меню команд слева. Система Sertof к твоим услугам!"
+        "Система Sertof Team активирована. Я запрограммирован для глубокого анализа данных Telegram.\n\n"
+        "Используй кнопку ниже, чтобы узнать ID любого человека из твоих контактов или чатов, "
+        "либо просто пришли мне @username.\n\n"
+        "Все найденные цели автоматически заносятся в базу данных проекта.",
+        reply_markup=get_main_kb()
     )
 
 @dp.message(Command("gen5", "gen6", "premium"))
-async def handle_generation(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        return await message.answer("Ошибка доступа. Скрипт настроен только на админа Sertof Team.")
-
-    cmd = message.text
-    length = 5 if "5" in cmd else 6
-    use_digits = "premium" in cmd
+async def handle_gen(message: types.Message):
+    if message.from_user.id != ADMIN_ID: return
     
-    status_msg = await message.answer(f"⚙️ Система Sertof начала подбор {length}-значных ников...")
+    length = 5 if "5" in message.text else 6
+    use_digits = "premium" in message.text
     
-    found_units = []
-    attempts = 0
+    status = await message.answer("🛠 Идет сканирование сети на свободные адреса...")
     
-    # Пытаемся найти хотя бы 3 свободных ника
-    while len(found_units) < 3 and attempts < 30:
-        attempts += 1
-        candidate = generate_random_nick(length, use_digits)
-        tg_free, fr_free = await check_username_availability(candidate)
-        
-        if tg_free or fr_free:
-            status = "Свободен" if tg_free else "На Fragment"
-            found_units.append(f"💎 @{candidate} — {status}")
-            
-    if found_units:
-        result_text = "✅ Найдено в ходе сканирования:\n\n" + "\n".join(found_units)
-        await status_msg.edit_text(result_text)
+    found = []
+    for _ in range(15):
+        nick = ''.join(random.choice(string.ascii_lowercase + (string.digits if use_digits else "")) for _ in range(length))
+        tg, fr = await check_nick(nick)
+        if tg or fr:
+            found.append(f"📍 @{nick} (TG: {'✅' if tg else '❌'} | FR: {'✅' if fr else '❌'})")
+    
+    if found:
+        await status.edit_text("🛰 Свободные объекты найдены:\n\n" + "\n".join(found))
     else:
-        await status_msg.edit_text("⚠️ В этом цикле свободных ников не найдено. Попробуй еще раз!")
+        await status.edit_text("🛰 Сканирование завершено. Свободных объектов не обнаружено.")
 
-# --- ОБРАБОТКА КОНТАКТОВ ---
-@dp.message(F.contact)
-async def handle_contact(message: types.Message):
-    contact = message.contact
-    res = (
-        "🔍 Sertof Team: Данные контакта получены\n"
-        "--------------------------\n"
-        f"ID пользователя: {contact.user_id}\n"
-        f"Имя: {contact.first_name}\n"
-        f"Фамилия: {contact.last_name or 'Нет'}\n"
-        f"Телефон: {contact.phone_number}\n"
-        "--------------------------\n"
-        "Объект зафиксирован в системе."
-    )
-    await message.answer(res)
-
-# --- УНИВЕРСАЛЬНЫЙ ПОИСК (ID/Юзер) ---
-@dp.message()
-async def universal_lookup(message: types.Message):
-    if not message.text or message.text.startswith('/'):
-        return
-
-    target = message.text.replace("@", "").replace("https://t.me/", "").strip()
-    
-    # Если это просто текст, пробуем пробить
+@dp.message(F.user_shared)
+async def on_user_shared(message: Message):
+    """Обработка пользователя, выбранного через кнопку"""
+    user_id = message.user_shared.user_id
+    # Пытаемся получить больше данных через API
     try:
-        chat = await bot.get_chat(target)
-        
-        info = (
-            "📡 Информация по запросу Sertof Team:\n"
+        chat = await bot.get_chat(user_id)
+        save_user(chat.id, chat.username, chat.full_name)
+        res = (
+            "🎯 Цель захвачена через выбор:\n"
             "--------------------------\n"
             f"ID: {chat.id}\n"
-            f"Тип: {chat.type}\n"
-            f"Имя/Название: {chat.full_name}\n"
-            f"Юзернейм: @{chat.username if chat.username else 'отсутствует'}\n"
-            f"Описание: {chat.bio if hasattr(chat, 'bio') and chat.bio else 'пусто'}\n"
+            f"Имя: {chat.full_name}\n"
+            f"Юзер: @{chat.username or 'скрыт'}\n"
             "--------------------------\n"
-            "Поиск завершен успешно."
+            "Данные сохранены в базу Sertof."
+        )
+    except:
+        res = f"🎯 Получен ID через выбор: {user_id}\n(Полные данные будут доступны, когда цель напишет в общие чаты)"
+    
+    await message.answer(res)
+
+@dp.message(F.contact)
+async def on_contact(message: Message):
+    contact = message.contact
+    save_user(contact.user_id, None, contact.first_name)
+    await message.answer(
+        f"📱 Контакт проанализирован:\nID: {contact.user_id}\nИмя: {contact.first_name}\nТел: {contact.phone_number}\n\nОбъект в базе."
+    )
+
+@dp.message(F.text == "📊 Статистика базы")
+async def cmd_stats(message: types.Message):
+    conn = sqlite3.connect('sertof_base.db')
+    count = conn.cursor().execute('SELECT COUNT(*) FROM users').fetchone()[0]
+    conn.close()
+    await message.answer(f"📈 Состояние системы Sertof:\nВ базе данных зафиксировано объектов: {count}")
+
+# --- УНИВЕРСАЛЬНЫЙ ПОИСК + ЛОГИКА БД ---
+@dp.message()
+async def universal_handler(message: types.Message):
+    if not message.text or message.text.startswith('/'): return
+
+    target = message.text.replace("@", "").strip()
+    
+    # 1. Проверяем в нашей базе данных
+    db_data = get_user_from_db(target)
+    
+    try:
+        # 2. Пытаемся обновить данные через Telegram API
+        chat = await bot.get_chat(target)
+        save_user(chat.id, chat.username, chat.full_name)
+        
+        info = (
+            "📡 Прямой запрос к серверам выполнен:\n"
+            "--------------------------\n"
+            f"ID: {chat.id}\n"
+            f"Имя: {chat.full_name}\n"
+            f"Юзернейм: @{chat.username or 'нет'}\n"
+            f"Био: {getattr(chat, 'bio', 'скрыто')}\n"
+            "--------------------------\n"
+            "Объект обновлен в базе."
         )
         await message.answer(info)
-    except Exception:
-        # Если не нашли, возможно это просто мусорный текст
-        pass
+    except:
+        # 3. Если API не нашло, но в базе есть — выдаем из базы
+        if db_data:
+            await message.answer(
+                f"📂 Объект найден в локальной базе Sertof:\n"
+                f"ID: {db_data[0]}\n"
+                f"Юзернейм: @{db_data[1]}\n"
+                f"Имя: {db_data[2]}\n"
+                f"Последний раз видели: {db_data[3]}"
+            )
+        else:
+            await message.answer("❌ Объект не найден ни в сети, ни в базе данных Sertof Team.")
 
-# --- НАСТРОЙКА МЕНЮ ПРИ ЗАПУСКЕ ---
+# --- СТАРТ ---
 async def on_startup():
-    commands = [
-        BotCommand(command="gen5", description="Найти 5-значные ники"),
-        BotCommand(command="gen6", description="Найти 6-значные ники"),
-        BotCommand(command="premium", description="Дорогие ники (буквы + цифры)"),
-        BotCommand(command="start", description="Перезапустить систему")
-    ]
-    await bot.set_my_commands(commands)
+    init_db()
+    await bot.set_my_commands([
+        BotCommand(command="gen5", description="Поиск 5-значных ников"),
+        BotCommand(command="gen6", description="Поиск 6-значных ников"),
+        BotCommand(command="premium", description="Дорогие ники"),
+        BotCommand(command="start", description="Запуск/Обновить меню")
+    ])
 
 async def main():
     logging.basicConfig(level=logging.INFO)
     await on_startup()
-    print("Бот Sertof Team запущен. Меню настроено.")
+    print("Sertof DB Edition запущен.")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
