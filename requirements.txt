@@ -1,1 +1,4 @@
-aiogram
+aiogram==2.25.1
+telethon
+aiohttp
+beautifulsoup4
