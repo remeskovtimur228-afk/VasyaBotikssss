@@ -1,98 +1,105 @@
 import asyncio
 import random
 import logging
+import os
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 
-# Конфигурация
+# --- КОНФИГУРАЦИЯ ---
 API_TOKEN = '8715185766:AAFa6DQQhdNRuT6uykhX22e3NGa6FgFbkQs'
 ADMIN_ID = 8318867685
 SHTEKER_ID = 8349398755
 ILISHAK_ID = 6193833286
 
-# Глобальное состояние (в идеале хранить в БД, но для RING -1 пойдет и так)
+# Файлы базы данных
+SHTEKER_FILE = 'shteker_db.txt'
+ILISHAK_FILE = 'ilishak_db.txt'
+
+# Состояние (по умолчанию Штекер)
 current_mode = "SHTEKER"
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-# --- ОГРОМНАЯ БАЗА ДАННЫХ ---
-SHTEKER_HATE = [
-    "Слышь, штекер, ты че тут раскукарекался? Завали хлебало. #АНТИШТЕКЕР",
-    "Опять этот штекерный высер... Тебе напомнить, кто ты по жизни? #АНТИШТЕКЕР",
-    "Штекер, твое место у параши, а не в этом чате. Понял? #АНТИШТЕКЕР",
-    "Ты че, реально думаешь, что твои буквы кто-то читает? Даун. #АНТИШТЕКЕР",
-    "Админ, кикните эту штекерную макаку, она воняет. #АНТИШТЕКЕР",
-    "Штекер, иди в розетку засунься, может хоть так поумнеешь. #АНТИШТЕКЕР",
-    "Твое лицо — это ходячий анти-пиар контрацепции. #АНТИШТЕКЕР",
-    "Ты — биологический мусор, штекер недоделанный. #АНТИШТЕКЕР"
-]
+# --- РАБОТА С ГИГАНТСКОЙ БАЗОЙ ---
+def check_and_create_db():
+    """Создает файлы базы с начальным паком, если их нет"""
+    if not os.path.exists(SHTEKER_FILE):
+        with open(SHTEKER_FILE, 'w', encoding='utf-8') as f:
+            # Сюда можно вписать хоть 1000 строк сразу
+            f.write("Слышь, штекер, завали ебало. #АНТИШТЕКЕР\n")
+            f.write("Штекер, ты че, опять из палаты сбежал? #АНТИШТЕКЕР\n")
+            f.write("Твое мнение весит меньше, чем твои мозги, штекер. #АНТИШТЕКЕР\n")
+            f.write("Админ, уберите это штекерное недоразумение. #АНТИШТЕКЕР\n")
 
-ILISHAK_HATE = [
-    "Илишак, ты в ГД даже 'Stereo Madness' не пройдешь, рачина ебанная.",
-    "В Стандофф 2 ты просто ходячий фраг для нубов. Удали игру, не позорься.",
-    "Твой скилл в Бравле — это уровень моей бабушки после инсульта.",
-    "Илишак, ты зачем телефон взял? Иди в песочницу, дегенерат.",
-    "Слышь, Илишак, ты тупой как пробка. Твой максимум — это кликеры для даунов.",
-    "Да ты в Стандоффе даже в небо попасть не можешь, криворукое чудовище.",
-    "Илишак — это диагноз. Сходи к врачу, может лишнюю хромосому удалят.",
-    "Твой IQ меньше, чем количество кубков у меня в Бравле на первом аккаунте."
-]
+    if not os.path.exists(ILISHAK_FILE):
+        with open(ILISHAK_FILE, 'w', encoding='utf-8') as f:
+            f.write("Илишак, ты в ГД даже прыгать не умеешь, рак.\n")
+            f.write("Стандофф 2 — не твое, иди в кубики играй, даун.\n")
+            f.write("Твой скилл в Бравле — это уровень дна океана.\n")
+            f.write("Илишак, ты тупой как пробка, удали все игры.\n")
 
-GENERIC_HATE = [
-    "Слышь, даун ебанный, ты нахуя его тегаешь?",
-    "Ты че, его фанатка? Не отмечай это говно здесь.",
-    "Зачем ты это чмо тегаешь? Тебе напомнить, что ты тоже дебил?",
-    "Еще раз его отметишь — и ты пойдешь нахуй вместе с ним."
-]
+def get_random_phrase(filename):
+    """Выбирает рандомную фразу из файла"""
+    try:
+        with open(filename, 'r', encoding='utf-8') as f:
+            lines = [line.strip() for line in f.readlines() if line.strip()]
+            return random.choice(lines) if lines else "База пуста, админ, заполни файл!"
+    except Exception:
+        return "Ошибка чтения базы!"
 
 # --- КОМАНДЫ АДМИНА ---
 @dp.message(Command("shteck"))
-async def set_shteker(message: types.Message):
+async def cmd_shteck(message: types.Message):
     global current_mode
     if message.from_user.id == ADMIN_ID:
         current_mode = "SHTEKER"
-        await message.answer("✅ Режим переключен на #АНТИШТЕКЕР. Начинаем травить штекера.")
+        await message.answer("🦾 Режим #АНТИШТЕКЕР активирован. Смерть штекеру.")
 
 @dp.message(Command("shick"))
-async def set_ilishak(message: types.Message):
+async def cmd_shick(message: types.Message):
     global current_mode
     if message.from_user.id == ADMIN_ID:
         current_mode = "ILISHAK"
-        await message.answer("✅ Режим переключен на ИЛИШАК. Гнобим за ГД и Стандофф.")
+        await message.answer("🎮 Режим ИЛИШАК активирован. Гнобим за ГД и Стандофф.")
 
-# --- ОСНОВНАЯ ЛОГИКА ---
+# --- ЛОГИКА АГРА ---
 @dp.message()
-async def hater_logic(message: types.Message):
+async def hater_handler(message: types.Message):
+    if not message.text: return
     user_id = message.from_user.id
-    text = message.text.lower() if message.text else ""
+    text_lower = message.text.lower()
 
-    # 1. Если кто-то тегает или отвечает этим двоим
+    # 1. Реакция на тех, кто тегает цель
     if message.reply_to_message:
-        replied_user = message.reply_to_message.from_user.id
-        if replied_user in [SHTEKER_ID, ILISHAK_ID]:
-            await message.reply(random.choice(GENERIC_HATE))
+        target = message.reply_to_message.from_user.id
+        if target in [SHTEKER_ID, ILISHAK_ID]:
+            await message.reply("Ты нахуя это чмо тегаешь, даун ебанный?")
             return
 
-    # 2. Логика для Штекера
+    # 2. Логика режима АНТИШТЕКЕР
     if current_mode == "SHTEKER" and user_id == SHTEKER_ID:
-        # Обязательный ответ на хештег или рандом 1 к 12
-        if "#штекер" in text or random.randint(1, 15) == 1:
-            await message.reply(random.choice(SHTEKER_HATE))
+        # Обязательно на тег или раз в 10-18 сообщений
+        if "#штекер" in text_lower or random.randint(1, 14) == 1:
+            phrase = get_random_phrase(SHTEKER_FILE)
+            await message.reply(phrase)
 
-    # 3. Логика для Илишака
+    # 3. Логика режима ИЛИШАК
     elif current_mode == "ILISHAK" and user_id == ILISHAK_ID:
-        # Рандомная реакция 1 к 12 на любое сообщение
-        if random.randint(1, 15) == 1:
-            await message.reply(random.choice(ILISHAK_HATE))
+        # Раз в 10-18 сообщений
+        if random.randint(1, 14) == 1:
+            phrase = get_random_phrase(ILISHAK_FILE)
+            await message.reply(phrase)
 
 # --- ЗАПУСК ---
 async def main():
     logging.basicConfig(level=logging.INFO)
+    check_and_create_db() # Инициализируем файлы
+    print("Бот Вася запущен и готов бесить людей.")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logging.info("Bot stopped")
+    except Exception as e:
+        print(f"Ошибка: {e}")
