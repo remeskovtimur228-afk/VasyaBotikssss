@@ -1,238 +1,93 @@
 import asyncio
-import logging
-import string
 import random
+import string
 import aiohttp
-import sqlite3
-import re
-from datetime import datetime
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
-from aiogram.types import (
-    BotCommand, ReplyKeyboardMarkup, KeyboardButton, 
-    KeyboardButtonRequestUser, Message
-)
+from bs4 import BeautifulSoup
+from telethon import TelegramClient
+from aiogram import Bot, Dispatcher, types
+from aiogram.utils import executor
 
-# --- КОНФИГУРАЦИЯ ---
-API_TOKEN = '8715185766:AAFa6DQQhdNRuT6uykhX22e3NGa6FgFbkQs'
+# --- ТВОИ ДАННЫЕ ---
+API_ID = 39018488
+API_HASH = '7d916e1f8d33357651d8bec28f155c50'
+BOT_TOKEN = '8715185766:AAFa6DQQhdNRuT6uykhX22e3NGa6FgFbkQs'
 
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher()
+# Инициализация клиентов
+# Сессия 'scanner_session' создаст файл при первом запуске
+client = TelegramClient('scanner_session', API_ID, API_HASH)
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher(bot)
 
-# --- ЯДРО БАЗЫ ДАННЫХ SERTOF ---
-def init_db():
-    conn = sqlite3.connect('sertof_ultra.db', check_same_thread=False)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            full_name TEXT,
-            saved_at DATETIME
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            query TEXT,
-            time DATETIME
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-def save_to_db(uid, uname, fname):
-    conn = sqlite3.connect('sertof_ultra.db', check_same_thread=False)
-    cursor = conn.cursor()
-    clean_uname = uname.replace("@", "").lower() if uname else None
+async def check_fragment(username):
+    """Проверка на платформе Fragment (аукционы)."""
+    url = f"https://fragment.com/username/{username}"
     try:
-        cursor.execute('''
-            INSERT OR REPLACE INTO users (user_id, username, full_name, saved_at)
-            VALUES (?, ?, ?, ?)
-        ''', (uid, clean_uname, fname, datetime.now()))
-        conn.commit()
-    finally:
-        conn.close()
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=5) as response:
+                if response.status == 200:
+                    html = await response.text()
+                    soup = BeautifulSoup(html, 'html.parser')
+                    status = soup.find('span', class_='tm-section-header-status')
+                    # Если написано Available — значит можно купить/взять
+                    if status and "Available" in status.text:
+                        return True
+                    return False
+                return True
+    except:
+        return True
 
-def log_search(uid, query):
-    conn = sqlite3.connect('sertof_ultra.db', check_same_thread=False)
-    cursor = conn.cursor()
+async def is_username_free(username):
+    """Двойная проверка: Telegram + Fragment."""
     try:
-        cursor.execute('INSERT INTO history (user_id, query, time) VALUES (?, ?, ?)', 
-                       (uid, query, datetime.now()))
-        conn.commit()
-    finally:
-        conn.close()
+        # Проверка через MTProto (самая точная)
+        await client.get_entity(username)
+        return False # Если сущность найдена, значит занят
+    except ValueError:
+        # Если Telegram говорит, что не знает такого, проверяем Fragment
+        return await check_fragment(username)
+    except Exception:
+        return False
 
-def search_in_db(target):
-    conn = sqlite3.connect('sertof_ultra.db', check_same_thread=False)
-    cursor = conn.cursor()
-    target_clean = target.replace("@", "").lower().strip()
-    try:
-        if target_clean.isdigit():
-            cursor.execute('SELECT * FROM users WHERE user_id = ?', (target_clean,))
-        else:
-            cursor.execute('SELECT * FROM users WHERE username = ?', (target_clean,))
-        return cursor.fetchone()
-    finally:
-        conn.close()
+def generate_5char():
+    """Генерация случайного 5-символьного юзернейма."""
+    chars = string.ascii_lowercase + string.digits
+    return ''.join(random.choice(chars) for _ in range(5))
 
-# --- УСИЛЕННЫЙ СКАНЕР (100% ПРОВЕРКА) ---
-async def check_availability(nick):
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    }
-    async with aiohttp.ClientSession(headers=headers) as session:
-        # 1. ПРОВЕРКА TELEGRAM (t.me)
-        tg_free = False
-        try:
-            async with session.get(f"https://t.me/{nick}", timeout=7) as resp:
-                content = await resp.text()
-                # Если страницы нет или есть текст о возможности связаться — ник может быть свободен
-                if "If you have Telegram, you can contact" not in content and "view in Telegram" not in content.lower():
-                    tg_free = True
-        except: tg_free = False
-
-        # 2. ПРОВЕРКА FRAGMENT (fragment.com)
-        fr_status = "Занят" # По умолчанию
-        try:
-            async with session.get(f"https://fragment.com/username/{nick}", timeout=7) as resp:
-                if resp.status == 200:
-                    f_content = await resp.text()
-                    # Ищем признаки того, что ник доступен или на аукционе
-                    if "Available" in f_content or "On auction" in f_content:
-                        fr_status = "Свободен/Аукцион"
-                    elif "Sold" in f_content:
-                        fr_status = "Продан"
-                    else:
-                        fr_status = "Занят"
-                else:
-                    fr_status = "Свободен (Нет на Fragment)"
-        except: fr_status = "Ошибка связи"
-
-        return tg_free, fr_status
-
-# --- ИНТЕРФЕЙС ---
-def main_menu():
-    return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="👤 Узнать ID (Выбор)", request_user=KeyboardButtonRequestUser(request_id=1))],
-        [KeyboardButton(text="📜 Моя история")],
-        [KeyboardButton(text="📊 Статус системы")]
-    ], resize_keyboard=True)
-
-# --- ОБРАБОТЧИКИ ---
-
-@dp.message(Command("start"))
-async def start(message: types.Message):
+@dp.message_handler(commands=['start'])
+async def cmd_start(message: types.Message):
     await message.answer(
-        "💎 Sertof Team: Система тотального сканирования юзернеймов.\n\n"
-        "Мы обновили парсер — теперь проверка Telegram и Fragment выполняется со 100% точностью.\n"
-        "Используй меню для поиска или генерации.",
-        reply_markup=main_menu()
+        "💎 **RING -1 Scanner Activated**\n\n"
+        "Я ищу свободные 5-значные юзернеймы, проверяя их через API Telegram и Fragment.\n"
+        "Нажми /scan, чтобы начать поиск.",
+        parse_mode="Markdown"
     )
 
-@dp.message(Command("gen5", "gen6", "premium"))
-async def gen_command(message: types.Message):
-    length = 5 if "5" in message.text else 6
-    is_premium = "premium" in message.text
-    chars = string.ascii_lowercase + (string.digits if is_premium else "")
+@dp.message_handler(commands=['scan'])
+async def cmd_scan(message: types.Message):
+    status_msg = await message.answer("🔍 Сканирую сеть... Подождите.")
     
-    status = await message.answer("🛰 Запуск глубокого сканирования Fragment & TG...")
     found = []
+    attempts = 0
     
-    for _ in range(10): # Генерируем пачку
-        nick = "".join(random.choice(chars) for _ in range(length))
-        tg_f, fr_s = await check_availability(nick)
-        
-        # Если ник хоть где-то интересен
-        if tg_f or fr_s == "Свободен/Аукцион" or fr_s == "Свободен (Нет на Fragment)":
-            found.append(f"📍 @{nick}\n└ TG: {'✅ Свободен' if tg_f else '❌ Занят'}\n└ Fragment: {fr_s}")
-            
+    while len(found) < 3 and attempts < 50:
+        candidate = generate_5char()
+        if await is_username_free(candidate):
+            found.append(candidate)
+        attempts += 1
+        await asyncio.sleep(0.5) # Маленькая задержка для стабильности
+
     if found:
-        await status.edit_text("🎯 Результаты точного поиска:\n\n" + "\n\n".join(found), disable_web_page_preview=True)
+        res = "✨ **Найдены свободные юзернеймы:**\n\n"
+        for f in found:
+            res += f"• `@{f}` — [Открыть](https://t.me/{f})\n"
+        await status_msg.edit_text(res, parse_mode="Markdown", disable_web_page_preview=True)
     else:
-        await status.edit_text("❌ В этом секторе свободных объектов не найдено. Повтори запрос.")
+        await status_msg.edit_text("❌ В этой итерации ничего не найдено. Попробуй еще раз через минуту.")
 
-@dp.message(F.user_shared)
-async def shared_user(message: Message):
-    uid = message.user_shared.user_id
-    log_search(message.from_user.id, f"Выбор ID: {uid}")
-    try:
-        chat = await bot.get_chat(uid)
-        save_to_db(chat.id, chat.username, chat.full_name)
-        await message.answer(f"🎯 Объект зафиксирован:\nID: {chat.id}\nИмя: {chat.full_name}\nЮзер: @{chat.username or 'отсутствует'}")
-    except:
-        save_to_db(uid, None, "Unknown")
-        await message.answer(f"🎯 ID получен: {uid}")
+async def on_startup(_):
+    # При первом запуске нужно будет ввести код из Telegram в консоли
+    await client.start()
+    print("--- СИСТЕМА RING -1 ЗАПУЩЕНА ---")
 
-@dp.message(F.contact)
-async def contact_user(message: Message):
-    c = message.contact
-    save_to_db(c.user_id, None, c.first_name)
-    log_search(message.from_user.id, f"Контакт: {c.user_id}")
-    await message.answer(f"📱 Контакт добавлен:\nID: {c.user_id}\nИмя: {c.first_name}\nТел: {c.phone_number}")
-
-@dp.message(F.text == "📜 Моя история")
-async def my_history(message: Message):
-    conn = sqlite3.connect('sertof_ultra.db', check_same_thread=False)
-    try:
-        rows = conn.cursor().execute('SELECT query, time FROM history WHERE user_id = ? ORDER BY id DESC LIMIT 5', (message.from_user.id,)).fetchall()
-        if not rows: return await message.answer("История пуста.")
-        res = "📜 Ваши последние запросы:\n" + "\n".join([f"• {r[1][:16]} -> {r[0]}" for r in rows])
-        await message.answer(res)
-    finally: conn.close()
-
-@dp.message(F.text == "📊 Статус системы")
-async def stats(message: Message):
-    conn = sqlite3.connect('sertof_ultra.db', check_same_thread=False)
-    try:
-        cnt = conn.cursor().execute('SELECT COUNT(*) FROM users').fetchone()[0]
-        await message.answer(f"📈 Всего объектов в базе Sertof: {cnt}")
-    finally: conn.close()
-
-@dp.message()
-async def global_search(message: Message):
-    if not message.text or message.text.startswith("/"): return
-    query = message.text.strip()
-    log_search(message.from_user.id, query)
-    
-    # Сначала пытаемся обновить данные через API
-    try:
-        target = query.replace("@", "").replace("https://t.me/", "")
-        chat = await bot.get_chat(target)
-        save_to_db(chat.id, chat.username, chat.full_name)
-        
-        # Сразу проверяем этот ник на Fragment для полноты картины
-        _, fr_s = await check_availability(target)
-        
-        await message.answer(
-            f"📡 Анализ объекта {target}:\n"
-            f"--------------------------\n"
-            f"ID: {chat.id}\n"
-            f"Имя: {chat.full_name}\n"
-            f"Юзер: @{chat.username or 'отсутствует'}\n"
-            f"Fragment: {fr_s}\n"
-            f"--------------------------"
-        )
-    except:
-        db_res = search_in_db(query)
-        if db_res:
-            await message.answer(f"📂 Найдено в архиве:\nID: {db_res[0]}\nЮзер: @{db_res[1] or 'скрыт'}\nИмя: {db_res[2]}")
-        else:
-            await message.answer("❌ Объект не найден. Попробуй кнопку выбора.")
-
-# --- СТАРТ ---
-async def main():
-    init_db()
-    await bot.set_my_commands([
-        BotCommand(command="gen5", description="Юзеры 5 знаков"),
-        BotCommand(command="gen6", description="Юзеры 6 знаков"),
-        BotCommand(command="premium", description="Премиум подбор"),
-        BotCommand(command="start", description="Старт")
-    ])
-    print("Sertof Precision Core запущен.")
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+if __name__ == '__main__':
+    executor.start_polling(dp, on_startup=on_startup)
