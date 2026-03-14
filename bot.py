@@ -1,7 +1,8 @@
-import logging
+import asyncio
 import random
-from aiogram import Bot, Dispatcher, types
-from aiogram.utils import executor
+import logging
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
 
 # Конфигурация
 API_TOKEN = '8715185766:AAFa6DQQhdNRuT6uykhX22e3NGa6FgFbkQs'
@@ -9,79 +10,89 @@ ADMIN_ID = 8318867685
 SHTEKER_ID = 8349398755
 ILISHAK_ID = 6193833286
 
-# Состояние бота: 'SHTEKER' или 'ILISHAK'
+# Глобальное состояние (в идеале хранить в БД, но для RING -1 пойдет и так)
 current_mode = "SHTEKER"
 
-# Инициализация
 bot = Bot(token=API_TOKEN)
-dp = Dispatcher(bot)
+dp = Dispatcher()
 
-# --- БАЗА ДАННЫХ ФРАЗ ---
-# В реальности сюда можно добавить тысячи строк
-phrases_shteker = [
-    "Слышь, штекер, ты опять вылез? Заткнись нахрен. #АНТИШТЕКЕР",
-    "Твое мнение тут никого не ебет, штекер недоделанный. #АНТИШТЕКЕР",
-    "Админ, уберите этого клоуна, он опять штекер вставил не туда. #АНТИШТЕКЕР",
-    "Ты че, реально думаешь, что ты крутой? Ты просто ошибка кода. #АНТИШТЕКЕР",
-    # ... добавь сюда еще 1000+ вариантов
+# --- ОГРОМНАЯ БАЗА ДАННЫХ ---
+SHTEKER_HATE = [
+    "Слышь, штекер, ты че тут раскукарекался? Завали хлебало. #АНТИШТЕКЕР",
+    "Опять этот штекерный высер... Тебе напомнить, кто ты по жизни? #АНТИШТЕКЕР",
+    "Штекер, твое место у параши, а не в этом чате. Понял? #АНТИШТЕКЕР",
+    "Ты че, реально думаешь, что твои буквы кто-то читает? Даун. #АНТИШТЕКЕР",
+    "Админ, кикните эту штекерную макаку, она воняет. #АНТИШТЕКЕР",
+    "Штекер, иди в розетку засунься, может хоть так поумнеешь. #АНТИШТЕКЕР",
+    "Твое лицо — это ходячий анти-пиар контрацепции. #АНТИШТЕКЕР",
+    "Ты — биологический мусор, штекер недоделанный. #АНТИШТЕКЕР"
 ]
 
-phrases_ilishak = [
-    "Илишак, иди в Бравл Старс тренируйся, рак ебанный.",
-    "Ты в ГД даже первый уровень не пройдешь, нулина.",
-    "Стандофф не для тебя, иди в кубики играй, даун.",
-    "Опять Илишак чет высирает, иди соси в своих мобилках.",
-    "Твой скилл в играх — это уровень деменции. Ты не прав во всем.",
-    # ... добавь сюда еще 1000+ вариантов
+ILISHAK_HATE = [
+    "Илишак, ты в ГД даже 'Stereo Madness' не пройдешь, рачина ебанная.",
+    "В Стандофф 2 ты просто ходячий фраг для нубов. Удали игру, не позорься.",
+    "Твой скилл в Бравле — это уровень моей бабушки после инсульта.",
+    "Илишак, ты зачем телефон взял? Иди в песочницу, дегенерат.",
+    "Слышь, Илишак, ты тупой как пробка. Твой максимум — это кликеры для даунов.",
+    "Да ты в Стандоффе даже в небо попасть не можешь, криворукое чудовище.",
+    "Илишак — это диагноз. Сходи к врачу, может лишнюю хромосому удалят.",
+    "Твой IQ меньше, чем количество кубков у меня в Бравле на первом аккаунте."
 ]
 
-generic_insults = [
-    "Ты нахуя его тегаешь, даун ебанный?",
-    "Слышь, че ты его отмечаешь? Ты такой же дегенерат?",
-    "Не трогай говно (его), а то вонять будет, дебил."
+GENERIC_HATE = [
+    "Слышь, даун ебанный, ты нахуя его тегаешь?",
+    "Ты че, его фанатка? Не отмечай это говно здесь.",
+    "Зачем ты это чмо тегаешь? Тебе напомнить, что ты тоже дебил?",
+    "Еще раз его отметишь — и ты пойдешь нахуй вместе с ним."
 ]
 
-# --- ЛОГИКА ---
-
-@dp.message_handler(commands=['shteck'])
+# --- КОМАНДЫ АДМИНА ---
+@dp.message(Command("shteck"))
 async def set_shteker(message: types.Message):
     global current_mode
     if message.from_user.id == ADMIN_ID:
         current_mode = "SHTEKER"
-        await message.answer("Режим переключен на #АНТИШТЕКЕР")
+        await message.answer("✅ Режим переключен на #АНТИШТЕКЕР. Начинаем травить штекера.")
 
-@dp.message_handler(commands=['shick'])
+@dp.message(Command("shick"))
 async def set_ilishak(message: types.Message):
     global current_mode
     if message.from_user.id == ADMIN_ID:
         current_mode = "ILISHAK"
-        await message.answer("Режим переключен на ИЛИШАК")
+        await message.answer("✅ Режим переключен на ИЛИШАК. Гнобим за ГД и Стандофф.")
 
-@dp.message_handler()
-async def main_logic(message: types.Message):
+# --- ОСНОВНАЯ ЛОГИКА ---
+@dp.message()
+async def hater_logic(message: types.Message):
     user_id = message.from_user.id
+    text = message.text.lower() if message.text else ""
 
-    # 1. Реакция на упоминание/ответ другими людьми
+    # 1. Если кто-то тегает или отвечает этим двоим
     if message.reply_to_message:
-        target_id = message.reply_to_message.from_user.id
-        if target_id in [SHTEKER_ID, ILISHAK_ID]:
-            await message.reply(random.choice(generic_insults))
+        replied_user = message.reply_to_message.from_user.id
+        if replied_user in [SHTEKER_ID, ILISHAK_ID]:
+            await message.reply(random.choice(GENERIC_HATE))
             return
 
-    # 2. Режим АНТИШТЕКЕР
-    if current_mode == "SHTEKER":
-        if user_id == SHTEKER_ID:
-            # Шанс ответа 1 к 10-18 (примерно 7%)
-            if random.randint(1, 15) == 1 or "#штекер" in message.text.lower():
-                await message.reply(random.choice(phrases_shteker))
+    # 2. Логика для Штекера
+    if current_mode == "SHTEKER" and user_id == SHTEKER_ID:
+        # Обязательный ответ на хештег или рандом 1 к 12
+        if "#штекер" in text or random.randint(1, 15) == 1:
+            await message.reply(random.choice(SHTEKER_HATE))
 
-    # 3. Режим ИЛИШАК
-    elif current_mode == "ILISHAK":
-        if user_id == ILISHAK_ID:
-            # Рандомная реакция
-            if random.randint(1, 15) == 1:
-                await message.reply(random.choice(phrases_ilishak))
+    # 3. Логика для Илишака
+    elif current_mode == "ILISHAK" and user_id == ILISHAK_ID:
+        # Рандомная реакция 1 к 12 на любое сообщение
+        if random.randint(1, 15) == 1:
+            await message.reply(random.choice(ILISHAK_HATE))
 
-if __name__ == '__main__':
+# --- ЗАПУСК ---
+async def main():
     logging.basicConfig(level=logging.INFO)
-    executor.start_polling(dp, skip_updates=True)
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logging.info("Bot stopped")
