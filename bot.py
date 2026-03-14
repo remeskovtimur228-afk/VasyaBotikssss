@@ -24,6 +24,30 @@ def get_lock(user_id):
         user_locks[user_id] = asyncio.Lock()
     return user_locks[user_id]
 
+# --- МОМЕНТАЛЬНЫЙ КЭШ КУЛДАУНОВ (АНТИ-СПАМ) ---
+cooldown_cache = {}
+task_cache = {}
+
+def is_on_cooldown(user_id, command_name, db_last_time_str, cooldown_hours):
+    now = datetime.now()
+    # 1. Сверхбыстрая проверка в оперативке (защита от автокликеров)
+    if user_id in cooldown_cache and command_name in cooldown_cache[user_id]:
+        if now < cooldown_cache[user_id][command_name] + timedelta(hours=cooldown_hours):
+            return True
+            
+    # 2. Проверка в базе данных
+    if db_last_time_str:
+        db_time = datetime.fromisoformat(db_last_time_str)
+        if now < db_time + timedelta(hours=cooldown_hours):
+            return True
+            
+    return False
+
+def set_cooldown_cache(user_id, command_name):
+    if user_id not in cooldown_cache:
+        cooldown_cache[user_id] = {}
+    cooldown_cache[user_id][command_name] = datetime.now()
+
 # --- БАЗА ДАННЫХ ---
 def init_db():
     conn = sqlite3.connect('vasya_hell_final.db')
@@ -153,13 +177,20 @@ class ChatMiddleware(BaseMiddleware):
 dp.message.middleware(ChatMiddleware())
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ КУЛДАУНОВ ---
-def get_cd_text(last_time_str, hours_cd):
-    if not last_time_str: return "✅ Готово"
-    dt = datetime.fromisoformat(last_time_str)
+def get_cd_text(user_id, command_name, db_last_time_str, hours_cd):
     now = datetime.now()
-    if dt + timedelta(hours=hours_cd) > now:
-        rem = (dt + timedelta(hours=hours_cd)) - now
-        return f"⏳ {int(rem.total_seconds() // 3600)}ч {int((rem.total_seconds() % 3600) // 60)}м"
+    dt = None
+    
+    # Берем время из кэша, если есть (оно самое точное), иначе из БД
+    if user_id in cooldown_cache and command_name in cooldown_cache[user_id]:
+        dt = cooldown_cache[user_id][command_name]
+    elif db_last_time_str:
+        dt = datetime.fromisoformat(db_last_time_str)
+        
+    if dt:
+        if dt + timedelta(hours=hours_cd) > now:
+            rem = (dt + timedelta(hours=hours_cd)) - now
+            return f"⏳ {int(rem.total_seconds() // 3600)}ч {int((rem.total_seconds() % 3600) // 60)}м"
     return "✅ Готово"
 
 # --- ОБРАБОТЧИКИ КОМАНД ---
@@ -237,19 +268,18 @@ async def cooldowns_cmd(m: types.Message):
     log_command()
     u, _ = get_u(m.from_user.id, m.from_user.full_name, m.from_user.username)
     
-    text = f"⏱ <b>ТВОИ ОТКАТЫ, {random.choice(INSULTS).upper()}:</b>\n\n"
-    text += f"🍆 <b>Grow (20ч):</b> {get_cd_text(u[3], 20)}\n"
-    text += f"🏎 <b>Гонки (20ч):</b> {get_cd_text(u[7], 20)}\n"
-    text += f"🎰 <b>Казино (1ч):</b> {get_cd_text(u[8], 1)}\n"
-    
     conn = sqlite3.connect('vasya_hell_final.db')
     cursor = conn.cursor()
     cursor.execute("SELECT last_roulette, last_steal FROM users WHERE user_id = ?", (u[0],))
     row = cursor.fetchone()
     conn.close()
-    
-    text += f"🔫 <b>Рулетка (2ч):</b> {get_cd_text(row[0] if row else None, 2)}\n"
-    text += f"🥷 <b>Спиздить (4ч):</b> {get_cd_text(row[1] if row else None, 4)}\n"
+
+    text = f"⏱ <b>ТВОИ ОТКАТЫ, {random.choice(INSULTS).upper()}:</b>\n\n"
+    text += f"🍆 <b>Grow (20ч):</b> {get_cd_text(u[0], 'grow', u[3], 20)}\n"
+    text += f"🏎 <b>Гонки (20ч):</b> {get_cd_text(u[0], 'race', u[7], 20)}\n"
+    text += f"🎰 <b>Казино (1ч):</b> {get_cd_text(u[0], 'casino', u[8], 1)}\n"
+    text += f"🔫 <b>Рулетка (2ч):</b> {get_cd_text(u[0], 'roulette', row[0] if row else None, 2)}\n"
+    text += f"🥷 <b>Спиздить (4ч):</b> {get_cd_text(u[0], 'steal', row[1] if row else None, 4)}\n"
     
     await m.reply(text)
 
@@ -257,23 +287,34 @@ async def cooldowns_cmd(m: types.Message):
 async def zadanie(m: types.Message):
     log_command()
     async with get_lock(m.from_user.id):
-        u, _ = get_u(m.from_user.id, m.from_user.full_name, m.from_user.username)
         now = str(datetime.now().date())
+        
+        # Моментальный кэш
+        if m.from_user.id in task_cache and task_cache[m.from_user.id] == now:
+            return await m.reply(f"Ты уже получал задание сегодня, {random.choice(INSULTS)}. Иди выполняй!")
+            
+        u, _ = get_u(m.from_user.id, m.from_user.full_name, m.from_user.username)
         if u[5] == now:
-            await m.reply(f"Хули ты ноешь, {random.choice(INSULTS)}? Твоё ебаное задание: <i>{u[6]}</i>. Иди делай, сука!")
-        else:
-            t = get_task()
-            update_u(m.from_user.id, last_task=now, current_task=t)
-            await m.reply(f"Слушай сюда, {random.choice(INSULTS)}. Твой квест:\n\n🔥 {t}\n\n<b>Не сделаешь — я твою родословную на хую вертел.</b>")
+            task_cache[m.from_user.id] = now
+            return await m.reply(f"Хули ты ноешь, {random.choice(INSULTS)}? Твоё ебаное задание: <i>{u[6]}</i>. Иди делай, сука!")
+        
+        t = get_task()
+        task_cache[m.from_user.id] = now
+        update_u(m.from_user.id, last_task=now, current_task=t)
+        await m.reply(f"Слушай сюда, {random.choice(INSULTS)}. Твой квест:\n\n🔥 {t}\n\n<b>Не сделаешь — я твою родословную на хую вертел.</b>")
 
 @dp.message(Command("grow"))
 async def grow(m: types.Message):
     log_command()
     async with get_lock(m.from_user.id):
         u, _ = get_u(m.from_user.id, m.from_user.full_name, m.from_user.username)
-        if u[3] and datetime.fromisoformat(u[3]) > datetime.now() - timedelta(hours=20):
-            await m.reply(f"Куда лезешь, {random.choice(INSULTS)}?! Твой вялый еще не остыл. Чекай /cd.")
-            return
+        
+        # ЖЕЛЕЗОБЕТОННАЯ ПРОВЕРКА
+        if is_on_cooldown(m.from_user.id, "grow", u[3], 20):
+            return await m.reply(f"Куда лезешь, {random.choice(INSULTS)}?! Твой вялый еще не остыл. Чекай /cd.")
+            
+        # МОМЕНТАЛЬНАЯ БЛОКИРОВКА ДО ЗАПИСИ В БД
+        set_cooldown_cache(m.from_user.id, "grow")
         
         change = round(random.uniform(-1.0, 1.2), 2)
         new_s = round(u[2] + change, 2) 
@@ -315,9 +356,13 @@ async def race(m: types.Message):
     log_command()
     async with get_lock(m.from_user.id):
         u, _ = get_u(m.from_user.id, m.from_user.full_name, m.from_user.username)
-        if u[7] and datetime.fromisoformat(u[7]) > datetime.now() - timedelta(hours=20):
-            await m.reply(f"Твоя колымага еще на свалке. Чекай /cd, {random.choice(INSULTS)}.")
-            return
+        
+        # ЖЕЛЕЗОБЕТОННАЯ ПРОВЕРКА
+        if is_on_cooldown(m.from_user.id, "race", u[7], 20):
+            return await m.reply(f"Твоя колымага еще на свалке. Чекай /cd, {random.choice(INSULTS)}.")
+
+        # БЛОКИРУЕМ
+        set_cooldown_cache(m.from_user.id, "race")
 
         msg = await m.reply("🏎 <b>Заезд пошел... Моча летит из окон...</b>")
         await asyncio.sleep(2)
@@ -334,9 +379,10 @@ async def casino(m: types.Message):
     async with get_lock(m.from_user.id):
         u, _ = get_u(m.from_user.id, m.from_user.full_name, m.from_user.username)
         
-        if u[8] and datetime.fromisoformat(u[8]) > datetime.now() - timedelta(hours=1):
-            await m.reply(f"Куда ты лезешь со своими копейками, {random.choice(INSULTS)}? Казик закрыт. Чекай /cd.")
-            return
+        if is_on_cooldown(m.from_user.id, "casino", u[8], 1):
+            return await m.reply(f"Куда ты лезешь со своими копейками, {random.choice(INSULTS)}? Казик закрыт. Чекай /cd.")
+
+        set_cooldown_cache(m.from_user.id, "casino")
 
         if random.random() > 0.8:
             update_u(u[0], size=round(u[2]+3.5, 2), last_casino=datetime.now().isoformat())
@@ -358,9 +404,11 @@ async def roulette(m: types.Message):
         conn.close()
         
         last_r = row[0] if row else None
-        if last_r and datetime.fromisoformat(last_r) > datetime.now() - timedelta(hours=2):
-            await m.reply(f"Ствол перегрелся, дегенерат. Чекай /cd.")
-            return
+        
+        if is_on_cooldown(m.from_user.id, "roulette", last_r, 2):
+            return await m.reply(f"Ствол перегрелся, дегенерат. Чекай /cd.")
+
+        set_cooldown_cache(m.from_user.id, "roulette")
 
         msg = await m.reply("🔫 <b>Крутишь барабан, приставляешь к виску...</b>")
         await asyncio.sleep(1.5)
@@ -388,9 +436,12 @@ async def steal(m: types.Message):
         row = cursor.fetchone()
         
         last_s = row[0] if row else None
-        if last_s and datetime.fromisoformat(last_s) > datetime.now() - timedelta(hours=4):
+        
+        if is_on_cooldown(m.from_user.id, "steal", last_s, 4):
             conn.close()
             return await m.reply(f"Ты еще от прошлой кражи не отмылся, шнырь. Чекай /cd.")
+
+        set_cooldown_cache(m.from_user.id, "steal")
 
         cursor.execute("SELECT user_id, display_name, size FROM users WHERE user_id != ? ORDER BY RANDOM() LIMIT 1", (u[0],))
         target = cursor.fetchone()
@@ -407,7 +458,6 @@ async def steal(m: types.Message):
             update_u(target[0], size=round(target[2]-stolen, 2))
             await m.reply(f"🥷 <b>ТЫ КРАСАВА!</b> Подрезал у {target[1]} целых <b>{stolen} см</b>!")
             
-            # Уведомление жертве
             try:
                 await bot.send_message(target[0], f"🚨 <b>АЛАРМ, ЕПТА!</b> Какая-то крыса ({u[2]} или как его там) спиздила у тебя <b>{stolen} см</b> пока ты спал!")
             except:
@@ -430,7 +480,6 @@ async def top(m: types.Message):
         name = r[0] if r[0] else "Какой-то лох"
         text += f"{i}. {name} — <b>{r[1]} см</b>\n"
     
-    # Текст может быть слишком длинным для ТГ, разбиваем если надо
     if len(text) > 4000:
         for x in range(0, len(text), 4000):
             await m.reply(text[x:x+4000])
@@ -613,21 +662,17 @@ async def auto_insult(m: types.Message):
     
     if m.chat.type in ['group', 'supergroup']:
         rand_val = random.random()
-        # Шанс 2% просто передразнить (повторить) сообщение
         if rand_val < 0.02 and m.text:
             mock_text = "".join(c.upper() if random.choice([True, False]) else c.lower() for c in m.text)
             await m.reply(f"<i>«{mock_text}»</i> — ебать ты умный.")
-        # Шанс 4% на рандомный наезд
         elif rand_val < 0.06: 
             await m.reply(f"Слышь, {random.choice(INSULTS)}, хули ты тут расписался? Иди лучше /grow жми.")
-        # Шанс 1% на мини-игру
         elif rand_val < 0.07:
             await m.answer(f"Скучно с вами, пидорасы. Кто первым напишет <code>Вася батя</code>, тому накину +1 см.")
 
 async def main():
     init_db()
     
-    # Стартовые настройки и меню команд официальные
     try:
         await bot.set_my_description("Здорово, еблан! Я Вася. Жми СТАРТ и готовь очко к пиздецу.")
     except:
